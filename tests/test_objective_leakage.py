@@ -12,6 +12,7 @@ benchopt = pytest.importorskip("benchopt")
 
 from benchmark_utils.adapters.base import BaseTSFMAdapter  # noqa: E402
 from benchmark_utils.inputs import ForecastInput  # noqa: E402
+from benchmark_utils.leakage import DEFAULT_MAX_SERIES  # noqa: E402
 from benchmark_utils.outputs import ForecastOutput  # noqa: E402
 from objective import Objective  # noqa: E402
 
@@ -80,3 +81,26 @@ def test_leaky_model_is_disqualified(objective):
     assert result["mae"] == float("inf")
     assert result["mse"] == float("inf")
     assert result["value"] == float("inf")
+
+
+class _Counting(_Clean):
+    """Clean model recording the number of (series, cutoff) windows per call."""
+
+    def __init__(self):
+        super().__init__()
+        self.windows = []
+
+    def predict(self, x: ForecastInput) -> ForecastOutput:
+        self.windows.append(sum(len(c) for c in x.cutoff_indexes))
+        return super().predict(x)
+
+
+def test_leakage_probe_size_is_a_parameter(objective):
+    assert Objective.parameters["leakage_max_series"] == [DEFAULT_MAX_SERIES]
+
+    objective.leakage_max_series = 1
+    model = _Counting()
+    result = objective.evaluate_result(model)
+    assert result["leakage"] == 0.0
+    # Two probe calls on one window each, then the full scored prediction.
+    assert model.windows == [1, 1, 2]

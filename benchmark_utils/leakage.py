@@ -22,11 +22,21 @@ untouched. Therefore any change in the forecast is caused solely by the
 model reading future target values — i.e. leakage. There are no false
 positives.
 
+Cost
+----
+The probe predicts on a reduced input: the first ``max_series`` series
+that have a perturbable future, each with only its last cutoff
+``max(C_i)``. The perturbation starts at ``max(C_i)``, so the last window
+is the only one guaranteed to see it; earlier windows would only re-run
+the model. The soundness argument above is unchanged, since it holds
+per cutoff.
+
 Coverage caveat: leakage that only reads the gap ``[c, max(C_i))`` of an
-*earlier* cutoff is not exercised. With the default single-window
-evaluation (:func:`benchmark_utils.windowing.make_forecasting_splits`
-with ``n_windows=1``) each series has exactly one cutoff, so coverage is
-complete.
+*earlier* cutoff is not exercised, nor is leakage specific to series
+beyond the first ``max_series`` probed ones. Leakage is a property of the
+adapter's code rather than of a particular series, so a handful of
+series is enough to catch it in practice; pass ``max_series=None`` to
+probe every series.
 """
 
 from dataclasses import dataclass, field
@@ -34,8 +44,16 @@ from typing import List, Optional
 
 import numpy as np
 
+from benchmark_utils.covariates import Covariates
 from benchmark_utils.inputs import ForecastInput
 from benchmark_utils.outputs import ForecastOutput
+
+
+# Probe size used by default. Leakage is a property of the adapter's code,
+# so a few series catch it; 8 single-window series keep the probe to 16
+# forecast windows (one small batch for any model) instead of re-predicting
+# the whole test set twice.
+DEFAULT_MAX_SERIES = 8
 
 
 @dataclass(frozen=True)
@@ -52,8 +70,9 @@ class LeakageReport:
     n_series_tested : int
         Series that had a perturbable future segment.
     n_series_skipped : int
-        Series with no future to perturb (``max(cutoff) >= T``) or no
-        cutoffs — leakage cannot be exercised for these.
+        Series encountered while selecting the probe that have no future
+        to perturb (``max(cutoff) >= T``) or no cutoffs — leakage cannot
+        be exercised for these.
     offending_series : list of int
         Indexes (into the original ``x``) of series whose forecast
         changed under perturbation.
@@ -86,6 +105,24 @@ def _perturb_future(
     return out
 
 
+def _select_series(covariates: Covariates, idx: List[int]) -> Covariates:
+    """Keep only series ``idx`` of every present covariate field.
+
+    Covariate arrays are aligned with the *full* series time axis (one
+    entry per series), so selecting series needs no time slicing — unlike
+    :meth:`Covariates.slice`, which cuts out a single window.
+    """
+
+    def pick(f):
+        return None if f is None else [f[i] for i in idx]
+
+    return Covariates(
+        static_covars=pick(covariates.static_covars),
+        hist_covars=pick(covariates.hist_covars),
+        future_covars=pick(covariates.future_covars),
+    )
+
+
 def detect_forecast_leakage(
     adapter,
     forecast_input: ForecastInput,
@@ -93,15 +130,16 @@ def detect_forecast_leakage(
     rtol: float = 1e-4,
     atol: float = 1e-6,
     seed: int = 0,
-    max_series: Optional[int] = None,
+    max_series: Optional[int] = DEFAULT_MAX_SERIES,
 ) -> LeakageReport:
     """Probe a fitted forecasting adapter for target leakage.
 
-    Runs ``adapter.predict`` twice — once on ``forecast_input`` and once
-    on a copy whose future target values (beyond each series' last
-    cutoff) are perturbed — and compares the quantile forecasts. A
-    leakage-free model produces identical forecasts; any difference
-    beyond ``rtol``/``atol`` is flagged.
+    Builds a reduced probe input — the first ``max_series`` series with a
+    perturbable future, each restricted to its last cutoff — and runs
+    ``adapter.predict`` twice on it: once as is and once with the future
+    target values (beyond that cutoff) perturbed. A leakage-free model
+    produces identical forecasts; any difference beyond ``rtol``/``atol``
+    is flagged.
 
     Parameters
     ----------
@@ -110,15 +148,18 @@ def detect_forecast_leakage(
         ForecastOutput``).
     forecast_input : ForecastInput
         The input to probe. Only the target ``x`` is perturbed;
-        ``covariates`` (including ``future_covars``) are passed through
-        unchanged, as future covariates are legitimately known.
+        ``covariates`` (including ``future_covars``) are subset to the
+        probed series but otherwise unchanged, as future covariates are
+        legitimately known.
     rtol, atol : float
         Tolerances forwarded to :func:`numpy.allclose`.
     seed : int
         Seed for the perturbation RNG (deterministic).
     max_series : int or None
-        If given, only the first ``max_series`` series are probed — useful
-        for a cheap in-loop check on large test sets.
+        Number of series to probe, taken in order among those with a
+        perturbable future. Defaults to :data:`DEFAULT_MAX_SERIES`, which
+        keeps the probe at ``2 * max_series`` forecast windows regardless
+        of the test-set size. ``None`` probes every series.
 
     Returns
     -------
@@ -126,19 +167,17 @@ def detect_forecast_leakage(
     """
     rng = np.random.default_rng(seed)
 
-    n = len(forecast_input.x)
-    if max_series is not None:
-        n = min(n, max_series)
-    probe_idx = list(range(n))
-
-    # Build a perturbed input over the SAME series order/shapes, touching
-    # only the probed series' future. Untouched series are passed through
-    # so the batch shape the model sees is identical.
-    perturbed_x = [np.asarray(s) for s in forecast_input.x]
+    # Pick the probed series and perturb their future beyond the last
+    # cutoff. Series with no cutoff or no future are skipped and do not
+    # count towards ``max_series``.
     tested, skipped = [], 0
-    for i in probe_idx:
-        series = np.asarray(forecast_input.x[i])
-        cutoffs = forecast_input.cutoff_indexes[i]
+    probe_x, perturbed_x, probe_cutoffs = [], [], []
+    for i, (series, cutoffs) in enumerate(
+        zip(forecast_input.x, forecast_input.cutoff_indexes)
+    ):
+        if max_series is not None and len(tested) >= max_series:
+            break
+        series = np.asarray(series)
         if len(cutoffs) == 0:
             skipped += 1
             continue
@@ -146,8 +185,12 @@ def detect_forecast_leakage(
         if cut >= series.shape[0]:
             skipped += 1
             continue
-        perturbed_x[i] = _perturb_future(series, cut, rng)
         tested.append(i)
+        probe_x.append(series)
+        perturbed_x.append(_perturb_future(series, cut, rng))
+        # Only the last window sees the perturbation; earlier windows of
+        # the same series would add model calls but no coverage.
+        probe_cutoffs.append([cut])
 
     if not tested:
         return LeakageReport(
@@ -157,12 +200,15 @@ def detect_forecast_leakage(
             n_series_skipped=skipped,
         )
 
-    baseline = adapter.predict(forecast_input)
+    # Both calls see the same reduced batch (series, cutoffs, covariates),
+    # so the only difference between them is the perturbed future.
+    covariates = _select_series(forecast_input.covariates, tested)
+    baseline = adapter.predict(
+        ForecastInput(x=probe_x, cutoff_indexes=probe_cutoffs, covariates=covariates)
+    )
     perturbed = adapter.predict(
         ForecastInput(
-            x=perturbed_x,
-            cutoff_indexes=forecast_input.cutoff_indexes,
-            covariates=forecast_input.covariates,
+            x=perturbed_x, cutoff_indexes=probe_cutoffs, covariates=covariates
         )
     )
     _validate_output(baseline)
@@ -170,9 +216,9 @@ def detect_forecast_leakage(
 
     offending: List[int] = []
     max_abs_diff = 0.0
-    for i in tested:
-        a = np.asarray(baseline.quantiles[i], dtype=np.float64)
-        b = np.asarray(perturbed.quantiles[i], dtype=np.float64)
+    for k, i in enumerate(tested):
+        a = np.asarray(baseline.quantiles[k], dtype=np.float64)
+        b = np.asarray(perturbed.quantiles[k], dtype=np.float64)
         if a.shape != b.shape:
             # Output shape itself depends on the future — unambiguous leakage.
             offending.append(i)

@@ -51,6 +51,7 @@ See that module for per-task predict signatures.
 import numpy as np
 from benchopt import BaseObjective
 
+from benchmark_utils.leakage import DEFAULT_MAX_SERIES
 from benchmark_utils.metrics import (  # noqa: F401  (re-exported)
     ALL_METRICS,
     HIGHER_IS_BETTER,
@@ -68,6 +69,11 @@ class Objective(BaseObjective):
     requirements = ["scikit-learn", "aeon"]
 
     sampling_strategy = "run_once"
+
+    # Number of series the forecasting leakage probe re-predicts (last
+    # window only); ``None`` probes every series. Kept small because the
+    # probe runs on top of the scored prediction.
+    parameters = {"leakage_max_series": [DEFAULT_MAX_SERIES]}
 
     # Minimal config for ``benchopt test``
     test_config = {
@@ -171,7 +177,13 @@ class Objective(BaseObjective):
         # any sensitivity to the future means the reported metrics would be
         # invalid, so we surface ``leakage=1`` and set every metric to +inf
         # (the worst value, since benchopt minimises).
-        report = detect_forecast_leakage(model, forecast_input)
+        # The probe only re-predicts the last window of a few series, so it
+        # stays cheap on datasets with many series and windows.
+        report = detect_forecast_leakage(
+            model,
+            forecast_input,
+            max_series=getattr(self, "leakage_max_series", DEFAULT_MAX_SERIES),
+        )
         if report.leaked:
             return {name: float("inf") for name in self.metrics} | {
                 "value": float("inf"),

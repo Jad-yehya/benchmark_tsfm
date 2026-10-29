@@ -13,7 +13,7 @@ import pytest
 from benchmark_utils.adapters.base import BaseTSFMAdapter
 from benchmark_utils.covariates import Covariates
 from benchmark_utils.inputs import ForecastInput
-from benchmark_utils.leakage import detect_forecast_leakage
+from benchmark_utils.leakage import DEFAULT_MAX_SERIES, detect_forecast_leakage
 from benchmark_utils.outputs import ForecastOutput
 
 H = 3
@@ -134,3 +134,92 @@ def test_max_series_limits_probe(forecast_input):
     report = detect_forecast_leakage(LeakyForecaster(), forecast_input, max_series=1)
     assert report.n_series_tested == 1
     assert report.offending_series == [0]
+
+
+class RecordingForecaster(CleanForecaster):
+    """Clean forecaster that records the inputs of every predict() call."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def predict(self, x: ForecastInput) -> ForecastOutput:
+        self.calls.append(x)
+        return super().predict(x)
+
+
+def _many_windows_input(n_series=20, n_windows=5, T=60):
+    rng = np.random.default_rng(2)
+    x = [rng.standard_normal((T, 1)) for _ in range(n_series)]
+    cutoffs = [[T - H * (n_windows - k) for k in range(n_windows)]] * n_series
+    return ForecastInput(x=x, cutoff_indexes=cutoffs)
+
+
+def test_probe_predicts_reduced_input():
+    """Probe sees at most max_series series, each with its last cutoff only."""
+    fi = _many_windows_input()
+    adapter = RecordingForecaster()
+    report = detect_forecast_leakage(adapter, fi, max_series=4)
+
+    assert report.n_series_tested == 4
+    assert len(adapter.calls) == 2
+    for call in adapter.calls:
+        assert len(call.x) == 4
+        assert [list(c) for c in call.cutoff_indexes] == [
+            [max(c)] for c in fi.cutoff_indexes[:4]
+        ]
+
+
+def test_leaky_forecaster_is_caught_with_default_on_many_windows():
+    report = detect_forecast_leakage(LeakyForecaster(), _many_windows_input())
+    assert report.leaked
+    assert report.offending_series == list(range(DEFAULT_MAX_SERIES))
+
+
+def test_covariates_are_subset_to_probed_series():
+    """Covariates follow the probed series, keeping full time alignment."""
+
+    class FutureCovarForecaster(BaseTSFMAdapter):
+        """Forecasts ``future_covars[cut:cut+H]`` — legitimate, not leaky."""
+
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def predict(self, x: ForecastInput) -> ForecastOutput:
+            self.calls.append(x)
+            cov = x.covariates
+            assert len(cov) == len(x.x)
+            quantiles = []
+            for i, (series, cutoffs) in enumerate(zip(x.x, x.cutoff_indexes)):
+                # Full-axis alignment: covariates match the series length.
+                assert cov.hist_covars[i].shape[0] == series.shape[0]
+                fc = np.asarray(cov.future_covars[i])
+                arr = np.stack([fc[c : c + H] for c in cutoffs])[:, :, :1, None]
+                quantiles.append(arr + cov.static_covars[i][0])
+            return ForecastOutput(quantiles=quantiles, quantile_levels=(0.5,))
+
+    rng = np.random.default_rng(4)
+    n, T = 6, 30
+    x = [rng.standard_normal((T, 1)) for _ in range(n)]
+    cutoffs = [[T - 2 * H, T - H]] * n
+    # Tag every covariate with its series index to check the selection.
+    covariates = Covariates(
+        static_covars=[np.array([float(i)]) for i in range(n)],
+        hist_covars=[np.full((T, 1), float(i)) for i in range(n)],
+        future_covars=[np.full((T, 2), float(i)) for i in range(n)],
+    )
+    # Series 0 has no future, so the probe picks series 1 and 2.
+    cutoffs[0] = [T]
+    fi = ForecastInput(x=x, cutoff_indexes=cutoffs, covariates=covariates)
+
+    adapter = FutureCovarForecaster()
+    report = detect_forecast_leakage(adapter, fi, max_series=2)
+
+    assert not report.leaked
+    assert report.n_series_tested == 2
+    for call in adapter.calls:
+        cov = call.covariates
+        assert [float(s[0]) for s in cov.static_covars] == [1.0, 2.0]
+        assert [float(h[0, 0]) for h in cov.hist_covars] == [1.0, 2.0]
+        assert [float(f[0, 0]) for f in cov.future_covars] == [1.0, 2.0]
