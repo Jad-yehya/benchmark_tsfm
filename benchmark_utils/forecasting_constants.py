@@ -14,36 +14,44 @@ import re
 # Metrics reported by every forecasting dataset (names from
 # benchmark_utils.metrics.ALL_METRICS).
 FORECASTING_METRICS = (
-    "mae", "mse", "rmse", "mase", "smape",
-    "crps", "wql", "mcis", "pinball", "skill_score_ratio",
+    "mae",
+    "mse",
+    "rmse",
+    "mase",
+    "smape",
+    "crps",
+    "wql",
+    "mcis",
+    "pinball",
+    "skill_score_ratio",
 )
 
 # Canonical base alias → (display_freq, MASE seasonality, default forecast horizon)
 _BASE = {
-    "Y": ("Y",   1,  6),
-    "Q": ("Q",   4,  8),
-    "M": ("M",  12, 12),
-    "W": ("W",  52, 13),
-    "D": ("D",   7, 14),
-    "H": ("H",  24, 24),
-    "T": ("T", 1440, 60),   # minutes
-    "S": ("S",   1, 60),
+    "Y": ("Y", 1, 6),
+    "Q": ("Q", 4, 8),
+    "M": ("M", 12, 12),
+    "W": ("W", 52, 13),
+    "D": ("D", 7, 14),
+    "H": ("H", 24, 24),
+    "T": ("T", 1440, 60),  # minutes
+    "S": ("S", 1, 60),
 }
 
 # aeon's spelled-out names → pandas offset alias. Sub-hourly words map to
 # multiplied aliases so the seasonality accounts for the step size.
 _AEON_TO_ALIAS = {
-    "yearly":      "Y",
-    "quarterly":   "Q",
-    "monthly":     "M",
-    "weekly":      "W",
-    "daily":       "D",
-    "hourly":      "H",
+    "yearly": "Y",
+    "quarterly": "Q",
+    "monthly": "M",
+    "weekly": "W",
+    "daily": "D",
+    "hourly": "H",
     "half_hourly": "30T",
-    "minutely":    "T",
-    "10_minutes":  "10T",
-    "seconds":     "S",
-    "4_seconds":   "4S",
+    "minutely": "T",
+    "10_minutes": "10T",
+    "seconds": "S",
+    "4_seconds": "4S",
 }
 
 
@@ -60,10 +68,16 @@ def from_aeon(freq_word: str) -> tuple[str, int, int]:
 _PANDAS_ALIAS_RE = re.compile(r"^(\d*)([A-Za-z]+)")
 _NORMALIZE_BASE = {
     # Newer pandas spellings → legacy single-letter aliases used in _BASE.
-    "YE": "Y", "YS": "Y", "A": "Y", "AS": "Y",
-    "QE": "Q", "QS": "Q",
-    "ME": "M", "MS": "M",
-    "min": "T", "MIN": "T",
+    "YE": "Y",
+    "YS": "Y",
+    "A": "Y",
+    "AS": "Y",
+    "QE": "Q",
+    "QS": "Q",
+    "ME": "M",
+    "MS": "M",
+    "min": "T",
+    "MIN": "T",
 }
 
 
@@ -99,21 +113,33 @@ def from_pandas(freq_alias: str) -> tuple[str, int, int]:
 # ---------------------------------------------------------------------------
 
 GIFT_EVAL_PRED_LENGTH_MAP: dict[str, int] = {
-    "M":  12, "MS": 12,
-    "W":   8, "W-SUN": 8, "W-MON": 8,
-    "D":  30,
-    "H":  48, "6H": 48,
-    "T":  48, "5T": 48, "10T": 48, "15T": 48, "30T": 48,
-    "S":  60, "4S": 60,
-    "Q":   8, "Q-DEC": 8,
-    "A":   4, "A-DEC": 4,
-    "Y":   4,
+    "M": 12,
+    "MS": 12,
+    "W": 8,
+    "W-SUN": 8,
+    "W-MON": 8,
+    "D": 30,
+    "H": 48,
+    "6H": 48,
+    "T": 48,
+    "5T": 48,
+    "10T": 48,
+    "15T": 48,
+    "30T": 48,
+    "S": 60,
+    "4S": 60,
+    "Q": 8,
+    "Q-DEC": 8,
+    "A": 4,
+    "A-DEC": 4,
+    "Y": 4,
 }
 
 # M4-competition horizons differ from the generic table; upstream
 # gift-eval selects this map whenever "m4" is in the dataset name.
 M4_PRED_LENGTH_MAP: dict[str, int] = {
-    "A": 6, "Y": 6,
+    "A": 6,
+    "Y": 6,
     "Q": 8,
     "M": 18,
     "W": 13,
@@ -122,15 +148,13 @@ M4_PRED_LENGTH_MAP: dict[str, int] = {
 }
 
 GIFT_EVAL_TERM_MULTIPLIER: dict[str, int] = {
-    "short":  1,
+    "short": 1,
     "medium": 10,
-    "long":   15,
+    "long": 15,
 }
 
 
-def gift_eval_prediction_length(
-    freq: str, term: str, dataset_name: str = ""
-) -> int:
+def gift_eval_prediction_length(freq: str, term: str, dataset_name: str = "") -> int:
     """Resolve the GIFT-Eval prediction length for a (freq, term) pair.
 
     ``freq`` is a pandas-style alias (e.g. ``"5T"``, ``"1H"``, ``"W-SUN"``).
@@ -145,8 +169,7 @@ def gift_eval_prediction_length(
             f"term must be one of {list(GIFT_EVAL_TERM_MULTIPLIER)}; got {term!r}"
         )
     pred_length_map = (
-        M4_PRED_LENGTH_MAP if "m4" in dataset_name
-        else GIFT_EVAL_PRED_LENGTH_MAP
+        M4_PRED_LENGTH_MAP if "m4" in dataset_name else GIFT_EVAL_PRED_LENGTH_MAP
     )
     base = pred_length_map.get(freq)
     if base is None:
