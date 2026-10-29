@@ -24,6 +24,7 @@ from sklearn.metrics import (
 )
 
 from benchmark_utils.outputs import ForecastOutput
+from benchmark_utils.protocol_metrics import PROTOCOL_CELLS, PROTOCOL_METRICS
 
 # ---------------------------------------------------------------------------
 # Forecasting — internal helpers
@@ -164,6 +165,21 @@ def mcis(y_true, forecast: ForecastOutput, alpha=0.05, **_):
     over = np.maximum(0.0, y_true - upper)
     score = (upper - lower) + (2.0 / alpha) * (under + over)
     return float(np.mean(score))
+
+
+# ---------------------------------------------------------------------------
+# Forecasting — benchmark protocols (upstream-exact)
+#
+# ``gluonts_*`` (GIFT-Eval / BOOM), ``fev_*`` (fev-bench) and ``time_*``
+# (TIME) reproduce each benchmark's own scoring. They differ from the
+# generic metrics above (e.g. MASE scaled by each window's own history,
+# NaN-aware averaging), hence the prefix. One implementation serves all
+# of them: see :mod:`benchmark_utils.protocol_metrics`. Module attributes
+# (``time_mase``, ``time_mae_cells``, ...) are kept for direct use.
+# ---------------------------------------------------------------------------
+
+globals().update(PROTOCOL_METRICS)
+globals().update(PROTOCOL_CELLS)
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +557,12 @@ EVENT_METRICS = {
     "map_iou": map_iou,
 }
 
-ALL_METRICS = {**FORECASTING_METRICS, **CLASSIFICATION_METRICS, **AD_METRICS}
+ALL_METRICS = {
+    **FORECASTING_METRICS,
+    **PROTOCOL_METRICS,
+    **CLASSIFICATION_METRICS,
+    **AD_METRICS,
+}
 
 
 # ---------------------------------------------------------------------------

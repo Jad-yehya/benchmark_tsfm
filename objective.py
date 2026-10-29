@@ -184,10 +184,31 @@ class Objective(BaseObjective):
         # same order the flattened forecast iterates (series-major, cutoff-minor).
         y_true = np.concatenate([np.asarray(yt) for yt in self.y_test], axis=0)
 
+        # Per-row history ``x[:cutoff]`` (views, no copy), aligned with the
+        # rows of ``y_true``. Metrics that scale by each window's own
+        # history (e.g. ``time_mase``) read it; the others ignore it.
+        contexts = [
+            np.asarray(series)[:cutoff]
+            for series, cutoffs in zip(self.X_test, self.cutoff_indexes)
+            for cutoff in cutoffs
+        ]
+        # Per-row (series index, window index counted from the series end,
+        # 0 = last window). Metrics that score each window on its own
+        # (e.g. ``fev_*``) group rows by it; the others ignore it.
+        row_index = np.array(
+            [
+                (i, len(cutoffs) - 1 - rank)
+                for i, cutoffs in enumerate(self.cutoff_indexes)
+                for rank in np.argsort(np.argsort(cutoffs))
+            ],
+            dtype=np.int64,
+        ).reshape(-1, 2)
         kwargs = dict(
             y_train=self.X_train,
             seasonality=self.meta.get("seasonality", 1),
             alpha=self.meta.get("mcis_alpha", 0.05),
+            contexts=contexts,
+            row_index=row_index,
         )
         result = {
             name: ALL_METRICS[name](y_true, forecast, **kwargs) for name in self.metrics
